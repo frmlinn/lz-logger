@@ -6,13 +6,6 @@
 
 A bare-metal, zero-allocation, and async-signal-safe logging library for C11 systems programming. Built specifically for environments where standard `libc` functions fail: custom memory allocators, signal handlers, and real-time kernel bypass applications.
 
-## The Problem: Why not just use `printf` or `zlog`?
-
-If you are writing a custom POSIX memory allocator (overriding `malloc`) or a critical `SIGSEGV` handler, using standard logging libraries is a death sentence:
-1. **The `malloc` recursion loop:** `printf` and logging libraries like `zlog` allocate memory internally. If you call them from inside your own `malloc`, you cause an infinite recursion that blows up the stack.
-2. **Async-Signal-Safety:** Standard I/O functions use internal locks and global buffers. If a thread crashes while holding the `libc` I/O lock, attempting to log the crash in the signal handler will cause an unrecoverable deadlock.
-
-
 
 ## Features
 
