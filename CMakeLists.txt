@@ -19,6 +19,6 @@ target_include_directories(lz_logger PUBLIC
 target_compile_options(lz_logger PRIVATE 
     -Wall -Wextra -Wpedantic -Werror
     -fPIC
-    $<$<CONFIG:Release>:-O3 -flto>
+    $<$<CONFIG:Release>:-O3>
     $<$<CONFIG:Debug>:-O0 -g>
 )
