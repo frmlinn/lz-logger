@@ -66,8 +66,12 @@ void lz_internal_log(int level, const char* file, int line, const char* format, 
 #define LZ_ERROR(fmt, ...) \
     do { if (LZ_LOG_UNLIKELY(g_lz_log_level <= LZ_LOG_LEVEL_ERROR)) lz_internal_log(LZ_LOG_LEVEL_ERROR, __FILE__, __LINE__, fmt, ##__VA_ARGS__); } while(0)
 
-/** @brief Fatal log macro. Traps (crashes) the program after logging. */
+/** * @brief Fatal log macro. Evaluated as an unlikely cold path.
+ * @note This macro ONLY logs the message to STDERR. 
+ * It no longer traps or aborts the process. The caller is strictly 
+ * responsible for halting the execution after invoking this macro.
+ */
 #define LZ_FATAL(fmt, ...) \
-    do { lz_internal_log(LZ_LOG_LEVEL_FATAL, __FILE__, __LINE__, fmt, ##__VA_ARGS__); __builtin_trap(); } while(0)
+    do { if (LZ_LOG_UNLIKELY(g_lz_log_level <= LZ_LOG_LEVEL_FATAL)) lz_internal_log(LZ_LOG_LEVEL_FATAL, __FILE__, __LINE__, fmt, ##__VA_ARGS__); } while(0)
 
 #endif // LZ_LOG_H
