@@ -7,16 +7,48 @@
 #include "lz_log.h"
 #include "lz_log_format.h"
 #include <stdarg.h>
+#include <errno.h> /* For EINTR and EAGAIN */
+#include <stdlib.h>
+#include <stdbool.h>
 #include <unistd.h>
 #include <time.h>
+#include <pthread.h>
 
 #ifdef __linux__
 #include <sys/syscall.h>
-#elif defined(__APPLE__)
-#include <pthread.h>
 #endif
 
-int g_lz_log_level = LZ_LOG_LEVEL_INFO;
+/* CPU Relax for spin-locks to avoid burning CPU and memory bus */
+#if defined(__x86_64__) || defined(__i386__)
+    #define LZ_CPU_RELAX() __asm__ volatile("pause" ::: "memory")
+#elif defined(__aarch64__) || defined(__arm__)
+    #define LZ_CPU_RELAX() __asm__ volatile("yield" ::: "memory")
+#else
+    #define LZ_CPU_RELAX() do {} while(0)
+#endif
+
+/* Global crash gate to ensure only one thread reports a fatal error */
+static _Atomic bool g_crash_gate = false;
+
+/**
+ * @brief Ensures all bytes are written to the file descriptor, resilient to signals.
+ */
+static void safe_write_all(int fd, const char* buf, size_t count) {
+    size_t written = 0;
+    while (written < count) {
+        ssize_t res = write(fd, buf + written, count - written);
+        if (LZ_LOG_UNLIKELY(res < 0)) {
+            if (errno == EINTR || errno == EAGAIN) {
+                continue; /* Interrupted by signal, retry */
+            }
+            break; /* Unrecoverable I/O error */
+        }
+        written += (size_t)res;
+    }
+}
+
+/* Initialize the atomic variable */
+_Atomic int g_lz_log_level = LZ_LOG_LEVEL_INFO;
 
 /* ANSI Color Codes */
 #define ANSI_COLOR_RED     "\x1b[31m"
@@ -28,13 +60,44 @@ int g_lz_log_level = LZ_LOG_LEVEL_INFO;
 
 #define LZ_LOG_MAX_MSG_SIZE 512
 
+/* Thread-local storage for Native TID */
+static __thread uint64_t tls_cached_tid = 0;
+
 /**
- * @brief Appends a string to the buffer safely.
+ * @brief Callback executed only in the child process immediately after a fork().
+ * Clears the inherited TID from the parent process to force a re-fetch.
+ */
+static void lz_log_reset_tid_cache_atfork(void) {
+    tls_cached_tid = 0;
+}
+
+/**
+ * @brief Library constructor. Registers the atfork handler automatically
+ * before main() or at library load time (if dynamic).
+ */
+__attribute__((constructor)) static void lz_log_init(void) {
+    pthread_atfork(NULL, NULL, lz_log_reset_tid_cache_atfork);
+}
+
+/**
+ * @brief Appends a string to the buffer using block-copy for SIMD optimization.
  */
 static inline void append_string(char* buf, size_t* pos, const char* str) {
     if (LZ_LOG_UNLIKELY(!str)) str = "(null)";
-    while (*str && *pos < (LZ_LOG_MAX_MSG_SIZE - 2)) {
-        buf[(*pos)++] = *str++;
+    
+    size_t len = lz_log_strlen(str);
+    size_t max_avail = (LZ_LOG_MAX_MSG_SIZE - 2) - *pos;
+    
+    // Clamp length to avoid buffer overflow
+    if (LZ_LOG_UNLIKELY(len > max_avail)) {
+        len = max_avail;
+    }
+    
+    if (LZ_LOG_LIKELY(len > 0)) {
+        /* LLVM/Clang lowers this to highly optimized inline assembly or SIMD 
+         * instructions (e.g., AVX/SSE) avoiding byte-by-byte copy loops. */
+        __builtin_memcpy(buf + *pos, str, len);
+        *pos += len;
     }
 }
 
@@ -42,27 +105,30 @@ static inline void append_string(char* buf, size_t* pos, const char* str) {
  * @brief Gets the native OS Thread ID with a Zero-Syscall Fast-Path.
  */
 static LZ_LOG_ALWAYS_INLINE uint64_t get_native_tid(void) {
+    if (LZ_LOG_LIKELY(tls_cached_tid != 0)) return tls_cached_tid;
+
 #ifdef __linux__
-    static __thread uint64_t cached_tid = 0;
-    if (LZ_LOG_LIKELY(cached_tid != 0)) return cached_tid;
-    cached_tid = (uint64_t)syscall(SYS_gettid);
-    return cached_tid;
+    tls_cached_tid = (uint64_t)syscall(SYS_gettid);
 #elif defined(__APPLE__)
-    static __thread uint64_t cached_tid = 0;
-    if (LZ_LOG_LIKELY(cached_tid != 0)) return cached_tid;
-    pthread_threadid_np(NULL, &cached_tid);
-    return cached_tid;
+    pthread_threadid_np(NULL, &tls_cached_tid);
 #else
-    return 0;
+    tls_cached_tid = 0;
 #endif
+
+    return tls_cached_tid;
 }
 
 /**
- * @brief Gets a fast, monotonic timestamp (microseconds).
+ * @brief Gets a fast, monotonic timestamp (microseconds) bypassing hardware reads if possible.
  */
 static inline uint64_t get_timestamp_us(void) {
     struct timespec ts;
+#if defined(__linux__) && defined(CLOCK_MONOTONIC_COARSE)
+    /* vDSO fast-path: ~2ns latency, skips hardware HPET/TSC reads */
+    clock_gettime(CLOCK_MONOTONIC_COARSE, &ts);
+#else
     clock_gettime(CLOCK_MONOTONIC, &ts);
+#endif
     return (uint64_t)(ts.tv_sec * 1000000ULL + ts.tv_nsec / 1000ULL);
 }
 
@@ -71,7 +137,7 @@ void lz_internal_log(int level, const char* file, int line, const char* format, 
     size_t pos = 0;
     char num_buf[32];
 
-    /* 1. Level & Color */
+    /* 1. Level & Color (Optimized with __builtin_memcpy via append_string) */
     switch (level) {
         case LZ_LOG_LEVEL_DEBUG: append_string(stack_buf, &pos, ANSI_COLOR_GRAY   "[DEBUG]" ANSI_COLOR_RESET " "); break;
         case LZ_LOG_LEVEL_INFO:  append_string(stack_buf, &pos, ANSI_COLOR_GREEN  "[INFO] " ANSI_COLOR_RESET " "); break;
@@ -94,12 +160,18 @@ void lz_internal_log(int level, const char* file, int line, const char* format, 
     append_string(stack_buf, &pos, lz_log_itoa(line, num_buf));
     append_string(stack_buf, &pos, " - ");
 
-    /* 4. Format parsing (Safe type extraction) */
+    /* 4. Format parsing (Safe type extraction & OOB prevention) */
     va_list args;
     va_start(args, format);
     while (*format && pos < (LZ_LOG_MAX_MSG_SIZE - 2)) {
         if (*format == '%') {
             format++;
+            
+            // OOB Check 1: Trailing '%' at the end of the string
+            if (LZ_LOG_UNLIKELY(*format == '\0')) {
+                stack_buf[pos++] = '%';
+                break;
+            }
             
             int is_long = 0;
             int is_size_t = 0;
@@ -111,12 +183,16 @@ void lz_internal_log(int level, const char* file, int line, const char* format, 
                 format++;
             }
 
+            // OOB Check 2: String ended right after modifiers (e.g., "%l")
+            if (LZ_LOG_UNLIKELY(*format == '\0')) {
+                break;
+            }
+
             switch (*format) {
                 case 's': 
                     append_string(stack_buf, &pos, va_arg(args, const char*)); 
                     break;
                 case 'd': {
-                    // Properly extract based on type promotion rules
                     int64_t val = is_size_t ? va_arg(args, ssize_t) :
                                   (is_long >= 2) ? va_arg(args, long long) :
                                   (is_long == 1) ? va_arg(args, long) :
@@ -144,7 +220,7 @@ void lz_internal_log(int level, const char* file, int line, const char* format, 
                     append_string(stack_buf, &pos, lz_log_ptr_to_hex((uintptr_t)va_arg(args, void*), num_buf)); 
                     break;
                 case 'c': {
-                    char c = (char)va_arg(args, int); // chars promote to int in variadic
+                    char c = (char)va_arg(args, int);
                     if (pos < (LZ_LOG_MAX_MSG_SIZE - 2)) stack_buf[pos++] = c;
                     break;
                 }
@@ -167,6 +243,28 @@ void lz_internal_log(int level, const char* file, int line, const char* format, 
     stack_buf[pos++] = '\n';
     stack_buf[pos] = '\0';
 
-    #pragma GCC diagnostic ignored "-Wunused-result"
-    write(STDERR_FILENO, stack_buf, pos);
+    if (LZ_LOG_UNLIKELY(level == LZ_LOG_LEVEL_FATAL)) {
+        /* CRASH GATE: Only the first crashing thread gets to write and abort */
+        bool expected = false;
+        if (atomic_compare_exchange_strong_explicit(&g_crash_gate, &expected, true, 
+                                                    memory_order_seq_cst, 
+                                                    memory_order_relaxed)) {
+            /* We are the winner thread. Write the autopsy and die. */
+            safe_write_all(STDERR_FILENO, stack_buf, pos);
+            
+            /* Trap the process immediately. Generates a deterministic core dump 
+             * pointing exactly to the code that called LZ_FATAL. */
+            __builtin_trap(); 
+        } else {
+            /* We are a loser thread. Another thread triggered a FATAL error first.
+             * We must hang indefinitely and let the winner kill the process, 
+             * preventing us from garbling the log or altering the core dump. */
+            for (;;) {
+                LZ_CPU_RELAX();
+            }
+        }
+    } else {
+        /* Standard flow for INFO, WARN, ERROR, DEBUG */
+        safe_write_all(STDERR_FILENO, stack_buf, pos);
+    }
 }

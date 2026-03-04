@@ -1,13 +1,9 @@
-/**
- * @file lz_log.h
- * @brief Zero-allocation, async-signal-safe logging macro system.
- */
-
 #ifndef LZ_LOG_H
 #define LZ_LOG_H
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdatomic.h> /* C11 Atomics */
 
 /* ========================================================================= *
  * Compiler Built-ins (Total Independence)
@@ -32,9 +28,9 @@
  * ========================================================================= */
 
 /** * @brief Current active log level. 
- * Can be modified at runtime to silence logs without recompiling.
+ * Thread-safe for concurrent runtime modification via C11 atomics.
  */
-extern int g_lz_log_level;
+extern _Atomic int g_lz_log_level;
 
 /* ========================================================================= *
  * Public Macro API
@@ -49,22 +45,22 @@ void lz_internal_log(int level, const char* file, int line, const char* format, 
     /** @brief Debug log macro. Evaporates in Release builds. */
     #define LZ_DEBUG(fmt, ...) do {} while(0)
 #else
-    /** @brief Debug log macro. Prints only if current level allows it. */
+    /** @brief Debug log macro. Evaluates level atomically with relaxed memory order. */
     #define LZ_DEBUG(fmt, ...) \
-        do { if (g_lz_log_level <= LZ_LOG_LEVEL_DEBUG) lz_internal_log(LZ_LOG_LEVEL_DEBUG, __FILE__, __LINE__, fmt, ##__VA_ARGS__); } while(0)
+        do { if (atomic_load_explicit(&g_lz_log_level, memory_order_relaxed) <= LZ_LOG_LEVEL_DEBUG) lz_internal_log(LZ_LOG_LEVEL_DEBUG, __FILE__, __LINE__, fmt, ##__VA_ARGS__); } while(0)
 #endif
 
-/** @brief Info log macro. */
+/** @brief Info log macro. Evaluates level atomically with relaxed memory order. */
 #define LZ_INFO(fmt, ...) \
-    do { if (g_lz_log_level <= LZ_LOG_LEVEL_INFO) lz_internal_log(LZ_LOG_LEVEL_INFO, __FILE__, __LINE__, fmt, ##__VA_ARGS__); } while(0)
+    do { if (atomic_load_explicit(&g_lz_log_level, memory_order_relaxed) <= LZ_LOG_LEVEL_INFO) lz_internal_log(LZ_LOG_LEVEL_INFO, __FILE__, __LINE__, fmt, ##__VA_ARGS__); } while(0)
 
 /** @brief Warning log macro. Evaluated as an unlikely cold path. */
 #define LZ_WARN(fmt, ...) \
-    do { if (LZ_LOG_UNLIKELY(g_lz_log_level <= LZ_LOG_LEVEL_WARN)) lz_internal_log(LZ_LOG_LEVEL_WARN, __FILE__, __LINE__, fmt, ##__VA_ARGS__); } while(0)
+    do { if (LZ_LOG_UNLIKELY(atomic_load_explicit(&g_lz_log_level, memory_order_relaxed) <= LZ_LOG_LEVEL_WARN)) lz_internal_log(LZ_LOG_LEVEL_WARN, __FILE__, __LINE__, fmt, ##__VA_ARGS__); } while(0)
 
 /** @brief Error log macro. Evaluated as an unlikely cold path. */
 #define LZ_ERROR(fmt, ...) \
-    do { if (LZ_LOG_UNLIKELY(g_lz_log_level <= LZ_LOG_LEVEL_ERROR)) lz_internal_log(LZ_LOG_LEVEL_ERROR, __FILE__, __LINE__, fmt, ##__VA_ARGS__); } while(0)
+    do { if (LZ_LOG_UNLIKELY(atomic_load_explicit(&g_lz_log_level, memory_order_relaxed) <= LZ_LOG_LEVEL_ERROR)) lz_internal_log(LZ_LOG_LEVEL_ERROR, __FILE__, __LINE__, fmt, ##__VA_ARGS__); } while(0)
 
 /** * @brief Fatal log macro. Evaluated as an unlikely cold path.
  * @note This macro ONLY logs the message to STDERR. 
@@ -72,6 +68,6 @@ void lz_internal_log(int level, const char* file, int line, const char* format, 
  * responsible for halting the execution after invoking this macro.
  */
 #define LZ_FATAL(fmt, ...) \
-    do { if (LZ_LOG_UNLIKELY(g_lz_log_level <= LZ_LOG_LEVEL_FATAL)) lz_internal_log(LZ_LOG_LEVEL_FATAL, __FILE__, __LINE__, fmt, ##__VA_ARGS__); } while(0)
+    do { if (LZ_LOG_UNLIKELY(atomic_load_explicit(&g_lz_log_level, memory_order_relaxed) <= LZ_LOG_LEVEL_FATAL)) lz_internal_log(LZ_LOG_LEVEL_FATAL, __FILE__, __LINE__, fmt, ##__VA_ARGS__); } while(0)
 
 #endif // LZ_LOG_H
