@@ -37,8 +37,8 @@ char* lz_log_itoa(int64_t value, char* buf) {
 
     if (value < 0) {
         negative = 1;
-        // Handle LONG_MIN correctly by casting to unsigned before negating
-        uval = (uint64_t)-(value + 1) + 1;
+        /* Strictly defined in C11: Unsigned negation avoids UB on INT64_MIN */
+        uval = -(uint64_t)value;
     } else {
         uval = (uint64_t)value;
     }

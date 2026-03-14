@@ -11,7 +11,7 @@
 
 #define LZ_LOG_LIKELY(x)   __builtin_expect(!!(x), 1)
 #define LZ_LOG_UNLIKELY(x) __builtin_expect(!!(x), 0)
-#define LZ_LOG_ALWAYS_INLINE inline __attribute__((always_inline))
+#define LZ_LOG_ALWAYS_INLINE static inline __attribute__((always_inline))
 
 /* ========================================================================= *
  * Log Levels
@@ -63,9 +63,8 @@ void lz_internal_log(int level, const char* file, int line, const char* format, 
     do { if (LZ_LOG_UNLIKELY(atomic_load_explicit(&g_lz_log_level, memory_order_relaxed) <= LZ_LOG_LEVEL_ERROR)) lz_internal_log(LZ_LOG_LEVEL_ERROR, __FILE__, __LINE__, fmt, ##__VA_ARGS__); } while(0)
 
 /** * @brief Fatal log macro. Evaluated as an unlikely cold path.
- * @note This macro ONLY logs the message to STDERR. 
- * It no longer traps or aborts the process. The caller is strictly 
- * responsible for halting the execution after invoking this macro.
+ * @note Triggers a crash-gate and traps the process (SIGILL/SIGTRAP) to 
+ * generate a deterministic core dump mapped to the failure line.
  */
 #define LZ_FATAL(fmt, ...) \
     do { if (LZ_LOG_UNLIKELY(atomic_load_explicit(&g_lz_log_level, memory_order_relaxed) <= LZ_LOG_LEVEL_FATAL)) lz_internal_log(LZ_LOG_LEVEL_FATAL, __FILE__, __LINE__, fmt, ##__VA_ARGS__); } while(0)
