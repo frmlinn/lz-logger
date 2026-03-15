@@ -43,7 +43,7 @@ _Atomic int g_lz_log_level __attribute__((aligned(64))) = LZ_LOG_LEVEL_INFO;
 static _Atomic bool g_crash_gate __attribute__((aligned(64))) = false;
 
 /* Thread-local storage for Native TID */
-static __thread uint64_t tls_cached_tid = 0;
+static __thread uint64_t tls_cached_tid __attribute__((tls_model("initial-exec"))) = 0;
 
 /**
  * @brief Ensures all bytes are written to the file descriptor, resilient to signals.
